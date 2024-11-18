@@ -1,60 +1,63 @@
-import socket
-import hashlib
+import asyncio
+import websockets
 from Crypto.Cipher import AES
-from Crypto.Util.Padding import unpad
-from sympy import mod_inverse
+from Crypto.Util.Padding import pad, unpad
+from hashlib import sha512
+import json
 
-# ElGamal verification
-def elgamal_verify(p, g, y, message_hash, r, s):
-    if not (1 < r < p):
+# ElGamal keys (Pre-generated for simplicity)
+elgamal_p = 23  # Prime number
+elgamal_g = 5   # Generator
+elgamal_private_key = 7  # Private key
+elgamal_public_key = pow(elgamal_g, elgamal_private_key, elgamal_p)  # Public key
+
+# AES key (Symmetric)
+aes_key = b'sixteenbytekeyyy'  # AES-128 key (16 bytes)
+
+
+def decrypt_message_aes(ciphertext, iv):
+    cipher = AES.new(aes_key, AES.MODE_CBC, iv)
+    plaintext = unpad(cipher.decrypt(ciphertext), AES.block_size).decode()
+    return plaintext
+
+
+def verify_elgamal_signature(message_hash, signature, public_key):
+    r, s = signature
+    if not (1 <= r < elgamal_p):
         return False
-    lhs = pow(y, r, p) * pow(r, s, p) % p
-    rhs = pow(g, message_hash, p)
-    return lhs == rhs
 
-# AES-128 decryption
-def aes_decrypt(key, iv, ciphertext):
-    cipher = AES.new(bytes.fromhex(key), AES.MODE_CBC, iv=bytes.fromhex(iv))
-    return unpad(cipher.decrypt(bytes.fromhex(ciphertext)), AES.block_size)
+    v1 = pow(elgamal_g, message_hash, elgamal_p)
+    v2 = (pow(public_key, r, elgamal_p) * pow(r, s, elgamal_p)) % elgamal_p
+    return v1 == v2
 
-# Server side implementation
-def server_program():
-    # ElGamal parameters
-    p = 7919  # A prime number
-    g = 2     # A generator
-    y = 1234  # public key
-    
-    # Start the server
-    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server_socket.bind(('localhost', 8080))
-    server_socket.listen(1)
-    
-    print("Server is listening...")
-    
-    conn, address = server_socket.accept()
-    print(f"Connection from {address}")
-    
-    # Receive the data
-    data = conn.recv(4096).decode()
-    print("Recieved Data is: ", data)
-    aes_key, iv, encrypted_message, signature = data.split('|')
-    
-    # Extract signature
-    r, s = eval(signature)
-    print("r,s values are: ", r, " ", s)
-    # Decrypt the message using AES-128
-    decrypted_message = aes_decrypt(aes_key, iv, encrypted_message)
-    print("Decrypted Message is: ", decrypted_message)
-    # Hash the decrypted message with SHA-512
-    message_hash = int(hashlib.sha512(decrypted_message).hexdigest(), 16)
-    
-    # Verify the digital signature
-    if elgamal_verify(p, g, y, message_hash, r, s):
-        print("Signature is valid. Message:", decrypted_message.decode())
-    else:
-        print("Signature is invalid.")
-    
-    conn.close()
 
-if __name__ == '__main__':
-    server_program()
+async def server_handler(websocket, path):
+    async for message in websocket:
+        # Receive the data from the client
+        data = json.loads(message)
+        encrypted_message = bytes.fromhex(data["encrypted_message"])
+        iv = bytes.fromhex(data["iv"])
+        signature = data["signature"]
+        client_public_key = data["public_key"]
+
+        # Decrypt the message
+        decrypted_message = decrypt_message_aes(encrypted_message, iv)
+        print(f"Decrypted message: {decrypted_message}")
+
+        # Verify the signature
+        message_hash = int.from_bytes(sha512(decrypted_message.encode()).digest(), byteorder="big")
+        is_valid = verify_elgamal_signature(message_hash, signature, client_public_key)
+
+        if is_valid:
+            print("Signature is valid. Message is authenticated.")
+            await websocket.send("Message received and verified successfully.")
+        else:
+            print("Signature verification failed!")
+            await websocket.send("Signature verification failed.")
+
+
+start_server = websockets.serve(server_handler, "localhost", 12345)
+
+print("Server started on ws://localhost:12345")
+asyncio.get_event_loop().run_until_complete(start_server)
+asyncio.get_event_loop().run_forever()
